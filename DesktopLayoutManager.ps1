@@ -521,7 +521,7 @@ $footer.Controls.Add($dot)
 $status = New-Label 'Ready.' 42 16 620 22 9.5 $false $cText $footer
 
 $chkAuto = New-Object System.Windows.Forms.CheckBox
-$chkAuto.Text = 'Auto-restore the selected layout when the screen returns to 2560x1440'
+$chkAuto.Text = 'Auto-switch: when the screen resolution changes, restore the layout saved for it'
 $chkAuto.Location = New-Object System.Drawing.Point(42, 42)
 $chkAuto.Size = New-Object System.Drawing.Size(620, 22)
 $chkAuto.ForeColor = $cMuted
@@ -611,7 +611,25 @@ $list.Add_SelectedIndexChanged({
     } catch { Set-Status "Cannot read layout: $($_.Exception.Message)" 'error' }
 })
 
-# Auto-restore: when the screen goes back to 2560x1440, wait 5 s and restore the selected layout
+# Find the saved layout that belongs to a screen resolution (e.g. "2560x1440").
+# The selected layout wins if it matches; otherwise the most recently saved matching layout is used.
+function Find-LayoutForScreen([string]$key) {
+    $files = @(Get-ChildItem -LiteralPath $layoutDir -Filter '*.json' | Sort-Object LastWriteTime -Descending)
+    $selected = Get-SelectedPath
+    if ($selected) {
+        $files = @($files | Where-Object { $_.FullName -eq $selected }) + @($files | Where-Object { $_.FullName -ne $selected })
+    }
+    foreach ($f in $files) {
+        try {
+            $d = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ([string]$d.Screen -eq $key) { return $f.FullName }
+        } catch {}
+    }
+    return $null
+}
+
+# Auto-switch: whenever the screen resolution changes, wait 5 s (Windows needs a moment to finish
+# rearranging the icons) and restore the saved layout that matches the new resolution.
 $script:lastKey = ''
 $script:pendingAt = $null
 $timer = New-Object System.Windows.Forms.Timer
@@ -619,16 +637,23 @@ $timer.Interval = 2000
 $timer.Add_Tick({
     $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $key = "$($b.Width)x$($b.Height)"
-    if ($key -ne $script:lastKey -and $key -eq '2560x1440' -and $chkAuto.Checked -and $list.SelectedItem) {
+    if ($script:lastKey -ne '' -and $key -ne $script:lastKey -and $chkAuto.Checked) {
         $script:pendingAt = (Get-Date).AddSeconds(5)
     }
     $script:lastKey = $key
     if ($script:pendingAt -and (Get-Date) -ge $script:pendingAt) {
         $script:pendingAt = $null
         try {
-            $n = Restore-Layout (Get-SelectedPath)
-            Set-Status "Auto-restored $n icons." 'ok'
-        } catch { Set-Status "Auto-restore failed: $($_.Exception.Message)" 'error' }
+            $now = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $nowKey = "$($now.Width)x$($now.Height)"
+            $p = Find-LayoutForScreen $nowKey
+            if ($p) {
+                $n = Restore-Layout $p
+                Set-Status "Resolution ${nowKey}: switched to '$([System.IO.Path]::GetFileNameWithoutExtension($p))' ($n icons)." 'ok'
+            } else {
+                Set-Status "Resolution ${nowKey}: no saved layout for this resolution." 'error'
+            }
+        } catch { Set-Status "Auto-switch failed: $($_.Exception.Message)" 'error' }
     }
 })
 $timer.Start()
